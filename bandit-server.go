@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -66,7 +67,7 @@ func main() {
 	router.POST("/reward/:domain", postReward)
 	router.POST("/stat/list/:domain", statList)
 
-	router.Run()
+	router.Run(":4444")
 }
 
 func statList(c *gin.Context) {
@@ -179,9 +180,11 @@ func (s *StorageManager) Incr(arm, domain string, hits int) error {
 	}
 
 	if isNewArm {
-		s.insertHits(arm, domain, hits)
-	} else {
-		s.updateHits(arm, domain, hits)
+		return errors.New("No arm with such id found")
+	}
+
+	if err = s.updateHits(arm, domain, hits); err != nil {
+		return err
 	}
 
 	return nil
@@ -252,21 +255,17 @@ func (s *StorageManager) updateHits(arm, domain string, hits int) error {
 
 // AddReward - ...
 func (s *StorageManager) AddReward(arm, domain string, reward float64) error {
-	log.Println(">>> AddReward")
-
 	isNewArm, err := s.checkArm(arm, domain)
 	if err != nil {
 		return err
 	}
 
 	if isNewArm {
-		if err := s.insertReward(arm, domain, reward); err != nil {
-			return err
-		}
-	} else {
-		if err := s.updateReward(arm, domain, reward); err != nil {
-			return err
-		}
+		return errors.New("No arm with siuch id found")
+	}
+
+	if err = s.updateReward(arm, domain, reward); err != nil {
+		return err
 	}
 
 	return nil
