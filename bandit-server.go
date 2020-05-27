@@ -271,25 +271,42 @@ func (s *StorageManager) AddReward(arm, domain string, reward float64) error {
 	return nil
 }
 
-func (s *StorageManager) insertReward(arm, domain string, reward float64) error {
-	sql := `
-	
-		insert into bandit_stat (arm, domain, hits, rewards)
-		values ($1, $2, $3, $4)
-	
-	`
-	_, err := storage.db.Exec(context.Background(), sql, arm, domain, 1, reward)
-	return err
-}
-
+// TODO: ну это прям совсем говнокод какой-то...
 func (s *StorageManager) updateReward(arm, domain string, reward float64) error {
+	currentReward, hits, err := s.getReward(arm, domain)
+	if err != nil {
+		return err
+	}
+
 	sql := `
 	
 		update bandit_stat
-		   set rewards = array_append(rewards, $1)
+		   set rewards = $1
 		 where arm = $2 and domain = $3 
 	
 	`
-	_, err := storage.db.Exec(context.Background(), sql, reward, arm, domain)
+	var newReward float64
+	newReward = (currentReward*(float64(hits)-1) + reward) / float64(hits)
+
+	_, err = storage.db.Exec(context.Background(), sql, newReward, arm, domain)
 	return err
+}
+
+// TODO: ну это прям совсем говнокод какой-то...
+func (s *StorageManager) getReward(arm, domain string) (float64, int64, error) {
+	sql := `
+	
+		select reward, hits
+		from bandit_stat
+		where arm = $1 and domain = $2
+
+	`
+
+	var reward float64
+	var hits int64
+	if err := s.db.QueryRow(context.Background(), sql, arm, domain).Scan(&reward, &hits); err != nil {
+		return reward, hits, err
+	}
+
+	return reward, hits, nil
 }
