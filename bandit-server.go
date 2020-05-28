@@ -6,7 +6,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -27,19 +26,20 @@ type StorageManager struct {
 
 var storage *StorageManager
 
-// ArmRequest - ...
-type ArmRequest struct {
+// Arm - ...
+type Arm struct {
 	Arm    string `json:"arm"`
 	Reward float64
 	Hits   int
+	Domain string
 }
 
 // Stat - ...
 type Stat struct {
-	Arm     string
-	Hits    int
-	Rewards []float64
-	Scores  float64
+	Arm    string
+	Hits   int
+	Reward float64
+	Scores float64
 }
 
 // StatResponse - ...
@@ -65,19 +65,18 @@ func main() {
 
 	router.POST("/hits/:domain", postHits)
 	router.POST("/reward/:domain", postReward)
-	router.POST("/stat/list/:domain", statList)
+	router.POST("/stat/list/:domain", postStatList)
 
 	router.Run(":4444")
 }
 
-func statList(c *gin.Context) {
+// curl -X POST -d '["80C300A59541", "14CB94CD2226"]' http://localhost:4444/stat/list/default
+func postStatList(c *gin.Context) {
 	var arms []string
 	if err := c.ShouldBindJSON(&arms); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-
-	log.Println(arms)
 
 	if len(arms) == 0 {
 		c.JSON(http.StatusNoContent, gin.H{"message": "no arms - no stats"})
@@ -99,7 +98,7 @@ func (s *StorageManager) GetStat(arms []string, domain string) ([]StatResponse, 
 
 	sql := `
 
-		select arm, hits, rewards
+		select arm, hits, reward
 		  from bandit_stat
 		 where domain = $1 and 
 			   arm in (%s) and 
@@ -125,7 +124,7 @@ func (s *StorageManager) GetStat(arms []string, domain string) ([]StatResponse, 
 	totalHits := 0
 	for rows.Next() {
 		var stat = new(Stat)
-		rows.Scan(&stat.Arm, &stat.Hits, &stat.Rewards)
+		rows.Scan(&stat.Arm, &stat.Hits, &stat.Reward)
 
 		totalHits = totalHits + stat.Hits
 		stats = append(stats, *stat)
@@ -136,15 +135,7 @@ func (s *StorageManager) GetStat(arms []string, domain string) ([]StatResponse, 
 	for _, s := range stats {
 		var statResp = new(StatResponse)
 
-		var rewards float64
-		if len(s.Rewards) > 0.0 {
-			for _, r := range s.Rewards {
-				rewards = rewards + r
-			}
-			rewards = rewards / float64(len(s.Rewards))
-		}
-
-		statResp.Scores = math.Sqrt((2.0*math.Log(float64(totalHits)))/float64(s.Hits)) + rewards
+		statResp.Scores = math.Sqrt((2.0*math.Log(float64(totalHits)))/float64(s.Hits)) + s.Reward
 		statResp.Arm = s.Arm
 
 		log.Printf("stat: %+v\n", s)
@@ -157,49 +148,21 @@ func (s *StorageManager) GetStat(arms []string, domain string) ([]StatResponse, 
 	return scores, nil
 }
 
+// curl -X POST -d '{"arm":"14CB94CD2226", "hits":1}' http://localhost:4444/hits/default
 func postHits(c *gin.Context) {
-	var req ArmRequest
+	var req Arm
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	log.Println("Arm = " + req.Arm)
-	if err := storage.Incr(req.Arm, c.Param("domain"), req.Hits); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
 
-	c.JSON(http.StatusCreated, gin.H{"message": "ok"})
-}
-
-// Incr - ...
-func (s *StorageManager) Incr(arm, domain string, hits int) error {
-	isNewArm, err := s.checkArm(arm, domain)
+	arm, err := storage.GetArm(req.Arm, c.Param("domain"))
 	if err != nil {
-		return err
-	}
-
-	if isNewArm {
-		return errors.New("No arm with such id found")
-	}
-
-	if err = s.updateHits(arm, domain, hits); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func postReward(c *gin.Context) {
-
-	log.Println("POST Reward")
-	var req ArmRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	//log.Println("Arm = " + req.Arm)
-	if err := storage.AddReward(req.Arm, c.Param("domain"), req.Reward); err != nil {
+
+	if err = arm.UpdateHits(req.Hits); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -207,39 +170,8 @@ func postReward(c *gin.Context) {
 	c.JSON(http.StatusCreated, gin.H{"message": "ok"})
 }
 
-func (s *StorageManager) checkArm(arm, domain string) (bool, error) {
-	sql := `
-	
-		select true from bandit_stat
-		where arm = $1 and domain = $2
-	
-	`
-
-	row := s.db.QueryRow(context.Background(), sql, arm, domain)
-	var existed bool
-	row.Scan(&existed)
-
-	log.Println(existed)
-
-	return !existed, nil
-}
-
-func (s *StorageManager) insertHits(arm, domain string, hits int) error {
-	sql := `
-
-		insert into bandit_stat (arm, domain, hits)
-		values ($1, $2, $3)
-	
-	`
-
-	if _, err := storage.db.Exec(context.Background(), sql, arm, domain, hits); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func (s *StorageManager) updateHits(arm, domain string, hits int) error {
+// UpdateHits - ...
+func (a Arm) UpdateHits(hits int) error {
 	sql := `
 
 		update bandit_stat 
@@ -249,64 +181,66 @@ func (s *StorageManager) updateHits(arm, domain string, hits int) error {
 	
 	`
 
-	_, err := storage.db.Exec(context.Background(), sql, hits, arm, domain)
+	_, err := storage.db.Exec(context.Background(), sql, hits, a.Arm, a.Domain)
 	return err
 }
 
-// AddReward - ...
-func (s *StorageManager) AddReward(arm, domain string, reward float64) error {
-	isNewArm, err := s.checkArm(arm, domain)
-	if err != nil {
-		return err
-	}
+// GetArm - ...
+func (s *StorageManager) GetArm(arm, domain string) (Arm, error) {
+	log.Println("arm = " + arm)
+	log.Println("domain = " + domain)
 
-	if isNewArm {
-		return errors.New("No arm with siuch id found")
-	}
-
-	if err = s.updateReward(arm, domain, reward); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-// TODO: ну это прям совсем говнокод какой-то...
-func (s *StorageManager) updateReward(arm, domain string, reward float64) error {
-	currentReward, hits, err := s.getReward(arm, domain)
-	if err != nil {
-		return err
-	}
-
+	var a Arm
 	sql := `
 	
-		update bandit_stat
-		   set rewards = $1
-		 where arm = $2 and domain = $3 
-	
-	`
-	var newReward float64
-	newReward = (currentReward*(float64(hits)-1) + reward) / float64(hits)
-
-	_, err = storage.db.Exec(context.Background(), sql, newReward, arm, domain)
-	return err
-}
-
-// TODO: ну это прям совсем говнокод какой-то...
-func (s *StorageManager) getReward(arm, domain string) (float64, int64, error) {
-	sql := `
-	
-		select reward, hits
+		select hits, reward, domain
 		from bandit_stat
 		where arm = $1 and domain = $2
 
 	`
 
-	var reward float64
-	var hits int64
-	if err := s.db.QueryRow(context.Background(), sql, arm, domain).Scan(&reward, &hits); err != nil {
-		return reward, hits, err
+	if err := s.db.QueryRow(context.Background(), sql, arm, domain).Scan(&a.Hits, &a.Reward, &a.Domain); err != nil {
+		return a, err
+	}
+	a.Arm = arm
+
+	return a, nil
+}
+
+func postReward(c *gin.Context) {
+
+	log.Println("POST Reward")
+	var req Arm
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
 	}
 
-	return reward, hits, nil
+	arm, err := storage.GetArm(req.Arm, c.Param("domain"))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if err = arm.UpdateReward(req.Reward); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{"message": "ok"})
+}
+
+// UpdateReward - ...
+func (a Arm) UpdateReward(reward float64) error {
+	sql := `
+	
+		update bandit_stat
+		   set reward = $1
+		 where arm = $2 and domain = $3 
+	
+	`
+	var newReward float64
+	newReward = (a.Reward*(float64(a.Hits)-1) + reward) / float64(a.Hits)
+
+	_, err := storage.db.Exec(context.Background(), sql, newReward, a.Arm, a.Domain)
+	return err
 }
