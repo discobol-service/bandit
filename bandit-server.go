@@ -19,16 +19,28 @@ import (
 	"github.com/jackc/pgx"
 )
 
+// StatResponse - ...
+type StatResponse struct {
+	Arm    string
+	Scores float64
+}
+
+// UpdateStatRequest - ...
+type UpdateStatRequest struct {
+	Arm    string  `json:"arm"`
+	Hits   int64   `json:"hits"`
+	Reward float64 `json:"reward"`
+}
+
 // StorageManager - ...
 type StorageManager struct {
 	db *pgx.Conn
 }
 
-var storage *StorageManager
-
-// Arm - ...
-type Arm struct {
-	Arm    string `json:"arm"`
+// StatRecord - ...
+type StatRecord struct {
+	ID     int64
+	Arm    string
 	Reward float64
 	Hits   int
 	Domain string
@@ -42,11 +54,7 @@ type Stat struct {
 	Scores float64
 }
 
-// StatResponse - ...
-type StatResponse struct {
-	Arm    string
-	Scores float64
-}
+var storage *StorageManager
 
 func init() {
 	conn, err := pgx.Connect(context.Background(), "postgresql://shootnix:12345@localhost/discobol")
@@ -63,15 +71,15 @@ func main() {
 	defer storage.db.Close(context.Background())
 	router := gin.Default()
 
-	router.POST("/hits/:domain", postHits)
-	router.POST("/reward/:domain", postReward)
-	router.POST("/stat/list/:domain", postStatList)
+	router.POST("/hits/:domain", postUpdateHits)
+	router.POST("/reward/:domain", postUpdateReward)
+	router.POST("/stat/list/:domain", postGetStat)
 
 	router.Run(":4444")
 }
 
 // curl -X POST -d '["80C300A59541", "14CB94CD2226"]' http://localhost:4444/stat/list/default
-func postStatList(c *gin.Context) {
+func postGetStat(c *gin.Context) {
 	var arms []string
 	if err := c.ShouldBindJSON(&arms); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -92,6 +100,52 @@ func postStatList(c *gin.Context) {
 	c.JSON(http.StatusOK, statList)
 }
 
+// curl -X POST -d '{"arm":"14CB94CD2226", "hits":1}' http://localhost:4444/hits/default
+func postUpdateHits(c *gin.Context) {
+	var req UpdateStatRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	sr, err := storage.FindOrCreateStatRecord(req.Arm, c.Param("domain"))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	if err = sr.UpdateHits(req.Hits); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{"message": "ok"})
+}
+
+// curl -X POST -d '{"arm":"14CB94CD2226", "reward":1}' http://localhost:4444/reward/default
+func postUpdateReward(c *gin.Context) {
+
+	log.Println("POST Reward")
+	var req UpdateStatRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	sr, err := storage.FindOrCreateStatRecord(req.Arm, c.Param("domain"))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	if err = sr.UpdateReward(req.Reward); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{"message": "ok"})
+}
+
 // GetStat - ...
 func (s *StorageManager) GetStat(arms []string, domain string) ([]StatResponse, error) {
 	stats := make([]Stat, 0, 0)
@@ -100,8 +154,8 @@ func (s *StorageManager) GetStat(arms []string, domain string) ([]StatResponse, 
 
 		select arm, hits, reward
 		  from bandit_stat
-		 where domain = $1 and 
-			   arm in (%s) and 
+		 where domain = $1 and
+			   arm in (%s) and
 			   hits != 0
 
 	`
@@ -148,99 +202,82 @@ func (s *StorageManager) GetStat(arms []string, domain string) ([]StatResponse, 
 	return scores, nil
 }
 
-// curl -X POST -d '{"arm":"14CB94CD2226", "hits":1}' http://localhost:4444/hits/default
-func postHits(c *gin.Context) {
-	var req Arm
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-
-	arm, err := storage.GetArm(req.Arm, c.Param("domain"))
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-
-	if err = arm.UpdateHits(req.Hits); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-
-	c.JSON(http.StatusCreated, gin.H{"message": "ok"})
-}
-
 // UpdateHits - ...
-func (a Arm) UpdateHits(hits int) error {
+func (sr StatRecord) UpdateHits(hits int64) error {
 	sql := `
 
-		update bandit_stat 
+		update bandit_stat
 			set hits = hits + $1
-		  where arm = $2 
+		  where arm = $2
 			and domain = $3
-	
-	`
 
-	_, err := storage.db.Exec(context.Background(), sql, hits, a.Arm, a.Domain)
+	`
+	_, err := storage.db.Exec(context.Background(), sql, hits, sr.Arm, sr.Domain)
 	return err
 }
 
-// GetArm - ...
-func (s *StorageManager) GetArm(arm, domain string) (Arm, error) {
+// FindOrCreateStatRecord - ...
+func (s *StorageManager) FindOrCreateStatRecord(arm, domain string) (StatRecord, error) {
 	log.Println("arm = " + arm)
 	log.Println("domain = " + domain)
 
-	var a Arm
+	sr, err := s.FindStatRecord(arm, domain)
+	if err != nil {
+		sr, err = s.CreateStatRecord(arm, domain)
+		if err != nil {
+			return sr, err
+		}
+	}
+
+	return sr, nil
+}
+
+// FindStatRecord - ...
+func (s *StorageManager) FindStatRecord(arm, domain string) (StatRecord, error) {
+	var sr StatRecord
 	sql := `
-	
-		select hits, reward, domain
+
+		select hits, reward, domain, arm
 		from bandit_stat
 		where arm = $1 and domain = $2
 
 	`
 
-	if err := s.db.QueryRow(context.Background(), sql, arm, domain).Scan(&a.Hits, &a.Reward, &a.Domain); err != nil {
-		return a, err
+	if err := s.db.QueryRow(context.Background(), sql, arm, domain).Scan(&sr.Hits, &sr.Reward, &sr.Domain, &sr.Arm); err != nil {
+		return sr, err
 	}
-	a.Arm = arm
 
-	return a, nil
+	return sr, nil
 }
 
-func postReward(c *gin.Context) {
+// CreateStatRecord - ...
+func (s *StorageManager) CreateStatRecord(arm, domain string) (StatRecord, error) {
+	var sr StatRecord
+	sql := `
 
-	log.Println("POST Reward")
-	var req Arm
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
+		insert into bandit_stat (arm, domain)
+		values ($1, $2)
+
+	`
+	if _, err := s.db.Exec(context.Background(), sql, arm, domain); err != nil {
+		return sr, err
 	}
 
-	arm, err := storage.GetArm(req.Arm, c.Param("domain"))
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	if err = arm.UpdateReward(req.Reward); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-
-	c.JSON(http.StatusCreated, gin.H{"message": "ok"})
+	return sr, nil
 }
 
 // UpdateReward - ...
-func (a Arm) UpdateReward(reward float64) error {
+func (sr StatRecord) UpdateReward(reward float64) error {
 	sql := `
-	
+
 		update bandit_stat
 		   set reward = $1
-		 where arm = $2 and domain = $3 
-	
+		 where arm = $2 and domain = $3
+
 	`
 	var newReward float64
-	newReward = (a.Reward*(float64(a.Hits)-1) + reward) / float64(a.Hits)
+	newReward = (sr.Reward*(float64(sr.Hits)-1) + reward) / float64(sr.Hits)
 
-	_, err := storage.db.Exec(context.Background(), sql, newReward, a.Arm, a.Domain)
+	_, err := storage.db.Exec(context.Background(), sql, newReward, sr.Arm, sr.Domain)
 	return err
 }
