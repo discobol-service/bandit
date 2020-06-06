@@ -57,7 +57,7 @@ type Stat struct {
 var storage *StorageManager
 
 func init() {
-	conn, err := pgx.Connect(context.Background(), "postgresql://shootnix:12345@localhost/discobol")
+	conn, err := pgx.Connect(context.Background(), os.Getenv("DISCOBOL_DBSTR"))
 	if err != nil {
 		log.Printf("Unable to connect to database: %v\n", err.Error())
 		os.Exit(1)
